@@ -23,7 +23,7 @@ This project is being built in public phases. Current state:
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Scoping, README, design doc | done |
-| 1 | Dataset builder (mining ground truth from GitHub) | in progress — see below |
+| 1 | Dataset builder (all three ground-truth sources) | done — not yet run against a real repo |
 | 2 | Runner + adapters (raw model APIs, PR-Agent) | not started |
 | 3 | Scoring (detection, localization, noise rate, LLM-judge) | not started |
 | 4 | Ship (Docker, GitHub Action, results site) | not started |
@@ -46,10 +46,17 @@ and SWR-Bench papers.
    samples uncommented hunks from the same PRs as negative (no-defect)
    cases. Filters low-signal comments (LGTM/praise-only) with a documented
    heuristic — see the design doc for its known limitations.
-3. **Synthetic bug injection** — not yet implemented
-   (`reviewbench/synthetic/injector.py` is a stub). Planned for later in
-   Phase 1: inject bugs into clean merged-PR diffs with an LLM, in the style
-   of DebugBench, and manually validate a sample.
+3. **Synthetic bug injection** (`reviewbench/synthetic/injector.py`) —
+   implemented. Sources clean merged-PR hunks
+   (`reviewbench/miners/clean_pr_miner.py` — merged, not a revert, no
+   substantive comments), then asks a model to inject exactly one realistic
+   bug, in the style of DebugBench. Emits the injected hunk as a `defect`
+   case and the clean original as a paired `no_defect` case, so
+   false-positive rate is measurable on the same code minus the bug.
+   Injections the model itself flags as obvious-on-sight are dropped by
+   default. **Synthetic cases are unvalidated by construction** — DebugBench
+   used a model to inject and humans to validate, and skipping the second
+   half produces a benchmark that measures nothing.
 
 Every emitted case is tagged with its `provenance` (`fixup`,
 `review_comment`, or `synthetic`) so results can — and will — be reported
@@ -62,12 +69,32 @@ than real ones; pooling them would inflate every reviewer's score.
 pip install -e ".[dev]"
 export GITHUB_TOKEN=ghp_...
 
+# The two organic sources — free, no model calls.
 python -m reviewbench.cli build-dataset \
   --repo psf/requests \
   --sources fixup,review_comment \
   --limit 300 \
   --out data/requests.jsonl
 ```
+
+Synthetic injection needs the Anthropic SDK and an API key, and costs money
+per case, so it is opt-in:
+
+```bash
+pip install -e ".[synthetic]"
+export ANTHROPIC_API_KEY=sk-ant-...
+
+python -m reviewbench.cli build-dataset \
+  --repo psf/requests \
+  --sources fixup,review_comment,synthetic \
+  --synthetic-limit 50 \
+  --out data/requests.jsonl
+```
+
+Model responses are cached on disk keyed by a hash of the full request
+(`.reviewbench_cache/` by default), so re-running a build after a crash or
+a tweak elsewhere in the pipeline does not re-pay for injections you have
+already generated. `--no-cache` disables it.
 
 Each line of the output is one `Case` (see [reviewbench/models.py](reviewbench/models.py)):
 diff hunk, surrounding file context, base/head commit SHAs, label
@@ -88,5 +115,8 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Tests mock the GitHub API (no network, no token required) and exercise the
-miner parsing logic and the dataset writer/dedup path directly.
+Tests mock the GitHub API (no network, no token required) and run the
+injector against a fake model client (no API key, no cost) — the injector
+depends on a `StructuredModelClient` protocol rather than on the Anthropic
+SDK directly, which is the same seam Phase 2's reviewer adapters will
+plug into.

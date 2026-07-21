@@ -7,3 +7,4 @@ venv/
 data/
 *.jsonl
 !tests/**/*.jsonl
+.reviewbench_cache/

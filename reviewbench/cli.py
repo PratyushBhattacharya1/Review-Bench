@@ -10,8 +10,10 @@ import logging
 import os
 import sys
 
+from reviewbench.cache import DEFAULT_CACHE_DIR, ResponseCache
 from reviewbench.dataset import build_and_write
 from reviewbench.github_client import GitHubClient
+from reviewbench.model_client import DEFAULT_MODEL, AnthropicClient
 
 
 def _build_dataset_command(args: argparse.Namespace) -> int:
@@ -29,15 +31,41 @@ def _build_dataset_command(args: argparse.Namespace) -> int:
         )
 
     sources = [s.strip() for s in args.sources.split(",") if s.strip()]
+
+    model_client = None
+    cache = None
+    if "synthetic" in sources:
+        api_key = args.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+        cache = ResponseCache(args.cache_dir, enabled=not args.no_cache)
+        try:
+            model_client = AnthropicClient(model=args.model, api_key=api_key, cache=cache)
+        except ImportError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+
     client = GitHubClient(token=token)
 
     summary = build_and_write(
-        client, owner, repo, args.out, sources=sources, pr_scan_limit=args.limit
+        client,
+        owner,
+        repo,
+        args.out,
+        sources=sources,
+        pr_scan_limit=args.limit,
+        model_client=model_client,
+        synthetic_limit=args.synthetic_limit,
     )
 
     print(f"Wrote {summary['total']} cases to {args.out}")
     print(f"  by provenance: {summary['by_provenance']}")
     print(f"  by label:      {summary['by_label']}")
+    if cache is not None:
+        print(f"  model cache:   {cache.stats}")
+    if summary["by_provenance"].get("synthetic"):
+        print(
+            "\nNote: synthetic cases are UNVALIDATED. Hand-verify a sample and report the\n"
+            "error rate alongside any score computed from them (see docs/DESIGN.md)."
+        )
     return 0
 
 
@@ -56,6 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     build.add_argument("--limit", type=int, default=300, help="max merged PRs to scan per miner (default: 300)")
     build.add_argument("--token", default=None, help="GitHub token (defaults to $GITHUB_TOKEN)")
+
+    synth = build.add_argument_group("synthetic injection (only used with --sources synthetic)")
+    synth.add_argument("--anthropic-api-key", default=None, help="defaults to $ANTHROPIC_API_KEY")
+    synth.add_argument("--model", default=DEFAULT_MODEL, help=f"injection model (default: {DEFAULT_MODEL})")
+    synth.add_argument("--synthetic-limit", type=int, default=50, help="max bugs to inject (default: 50)")
+    synth.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help="model response cache directory")
+    synth.add_argument("--no-cache", action="store_true", help="disable the model response cache")
+
     build.set_defaults(func=_build_dataset_command)
 
     args = parser.parse_args(argv)

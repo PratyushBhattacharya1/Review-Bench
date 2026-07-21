@@ -65,7 +65,7 @@ Concretely, this shows up in two places:
 |---|---|---|
 | Fixup/revert mining | Highest — a human explicitly undid this PR | Reverts happen for non-bug reasons too (scope cut, merge conflict cleanup, "reverting to unblock CI"); title/body pattern-matching will catch some false positives. Every case retains the revert PR's URL so a human can spot-check the reason. |
 | Human review comments | Medium — approximate, per CodeReviewer's own framing | Comments that aren't about defects (style nits, questions, praise) get filtered by a keyword/length heuristic that is deliberately conservative and will still let some non-defect comments through; absence of a comment is not proof of absence of a defect (reviewers miss things — this is exactly the gap the whole project exists to measure, so it cannot be fully removed) |
-| Synthetic injection | Lowest realism, cleanest label | Injected bugs are, on average, easier to spot than organic ones (LLM-injected bugs tend toward "obviously wrong" rather than "subtly wrong"); not yet implemented |
+| Synthetic injection | Lowest realism, cleanest label | Injected bugs are, on average, easier to spot than organic ones (LLM-injected bugs tend toward "obviously wrong" rather than "subtly wrong"). Two partial mitigations are implemented: the injection prompt asks specifically for bugs a careless reviewer would plausibly miss, and injections the model itself flags as obvious-on-sight are dropped. Neither mitigation is verification — the model grading its own subtlety is exactly the kind of self-report this project exists to distrust. The clean source hunks also inherit source 2's weakness: "no substantive review comment" is not proof the original was defect-free, so an injected case could in principle contain two bugs, one of them unlabeled. |
 
 Because these three sources have genuinely different signal strength,
 **results are always reported broken out by provenance, never pooled into
@@ -98,7 +98,26 @@ number is the project's credibility, not a footnote.
   (e.g., "is this comment substantive") from needing per-language tuning
   before the core pipeline is proven.
 - A hosted service or web UI. CLI + JSONL only.
-- Full synthetic injection. Stubbed with a documented interface; deferred
-  until the two organic sources are validated against real repos, since
-  synthetic data is the least realistic source and the easiest to
-  generate — building it first would be building the easy 20%.
+- Automated validation of synthetic cases. The injector deliberately does
+  not try to verify that an injected bug is real; DebugBench used a model
+  to inject and humans to validate, and a pipeline that self-validates is
+  just the model grading its own homework. Synthetic cases are emitted
+  tagged `UNVALIDATED` and the CLI says so on every run that produces them.
+
+## Cost control
+
+Synthetic injection is the only source that costs money per case, and the
+arithmetic gets bad quickly: a few hundred cases times several model
+configs times several iterations of the pipeline. Three decisions follow:
+
+1. **The response cache exists before the first real run**, not after the
+   first surprising bill. It is keyed on a hash of the full request (model,
+   system prompt, user prompt, schema, effort, max_tokens), so a hit is
+   only returned for a byte-identical request, and it persists on disk so
+   it survives the crash-fix-rerun loop that dominates early development.
+2. **Synthetic is opt-in.** It never runs unless explicitly listed in
+   `--sources`, and it errors rather than silently skipping if no model
+   client is available — a silent skip would let someone believe they had
+   synthetic coverage they had not paid for.
+3. **`--synthetic-limit` defaults to 50**, not unlimited. The default
+   should be a number someone can afford to run by accident.

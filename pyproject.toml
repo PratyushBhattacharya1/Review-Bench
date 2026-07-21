@@ -12,6 +12,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+synthetic = [
+    "anthropic>=0.40",
+]
 dev = [
     "pytest>=8.0",
     "responses>=0.25",
