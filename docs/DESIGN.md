@@ -64,7 +64,7 @@ Concretely, this shows up in two places:
 | Source | Signal strength | Known weakness |
 |---|---|---|
 | Fixup/revert mining | Highest — a human explicitly undid this PR | Reverts happen for non-bug reasons too (scope cut, merge conflict cleanup, "reverting to unblock CI"); title/body pattern-matching will catch some false positives. Every case retains the revert PR's URL so a human can spot-check the reason. |
-| Human review comments | Medium — approximate, per CodeReviewer's own framing | Comments that aren't about defects (style nits, questions, praise) get filtered by a keyword/length heuristic that is deliberately conservative and will still let some non-defect comments through; absence of a comment is not proof of absence of a defect (reviewers miss things — this is exactly the gap the whole project exists to measure, so it cannot be fully removed) |
+| Human review comments | Medium — approximate, per CodeReviewer's own framing | Comments that aren't about defects (style nits, questions, praise) get filtered by a keyword/length heuristic plus thread-root filtering (below); some non-defect comments still get through; absence of a comment is not proof of absence of a defect (reviewers miss things — this is exactly the gap the whole project exists to measure, so it cannot be fully removed) |
 | Synthetic injection | Lowest realism, cleanest label | Injected bugs are, on average, easier to spot than organic ones (LLM-injected bugs tend toward "obviously wrong" rather than "subtly wrong"). Two partial mitigations are implemented: the injection prompt asks specifically for bugs a careless reviewer would plausibly miss, and injections the model itself flags as obvious-on-sight are dropped. Neither mitigation is verification — the model grading its own subtlety is exactly the kind of self-report this project exists to distrust. The clean source hunks also inherit source 2's weakness: "no substantive review comment" is not proof the original was defect-free, so an injected case could in principle contain two bugs, one of them unlabeled. |
 
 Because these three sources have genuinely different signal strength,
@@ -91,6 +91,30 @@ is the label actually correct, is the diff hunk the actual defect
 location, is the human comment (if present) actually about the flagged
 defect. The resulting error rate is reported alongside every score. This
 number is the project's credibility, not a footnote.
+
+### What verification caught (first live run, psf/requests)
+
+The first real run existed to produce exactly this number, and it did its
+job. A hand-classification of the review-comment miner's positive labels
+found roughly **55–60% of them were not defects** — they were replies
+inside review threads ("good call", "thanks, pushed", "just saw your other
+comment"). GitHub's PR-comments endpoint returns every comment in a thread,
+and these replies cleared the length + non-trivial-ack filters.
+
+Root cause and fix: a reply carries `in_reply_to_id`; a thread-initiating
+comment does not. Filtering to thread roots (`is_thread_root`) removed the
+reply chatter with no loss of true positives on the overlapping PRs — on
+one two-PR overlap it dropped 6 positives to 3, and all 3 removed were
+false positives.
+
+Residual, un-fixed noise: a thread *root* can still be a question or an
+informational observation rather than a defect flag ("Tested on my repo,
+works both from the tab…"). That is a smaller and harder problem than the
+systematic reply noise, and it is the kind of thing the Phase 3
+LLM-as-judge semantic match is meant to catch, not a keyword heuristic.
+The verification error rate on positives should be re-measured on a full
+authenticated run before the dataset is used for scoring; the number above
+is from an unauthenticated ~20-PR scan and is directional, not final.
 
 ## Non-goals for Phase 1
 

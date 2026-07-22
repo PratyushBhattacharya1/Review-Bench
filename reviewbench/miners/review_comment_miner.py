@@ -43,6 +43,26 @@ def is_substantive_comment(body: str) -> bool:
     return True
 
 
+def is_thread_root(comment: dict) -> bool:
+    """True if `comment` initiates a review thread rather than replying to one.
+
+    GitHub's PR-comments endpoint returns every comment in a thread, so the
+    back-and-forth replies ("good call", "thanks, pushed", "yes we could
+    remove them") come back alongside the comment that actually raised the
+    issue. Those replies clear the length + non-trivial filters and were
+    landing as `defect` cases — a hand-verified run on psf/requests found
+    roughly half the positive labels were thread chatter, not issues.
+
+    A reply carries `in_reply_to_id`; a thread-initiating comment does not.
+    Keeping only the roots is what makes "a comment marks a defect" a
+    defensible approximation instead of "some human said something on this
+    diff." It is still an approximation (see docs/DESIGN.md) — a root
+    comment can be a question or a nit — but it removes the largest, most
+    systematic source of label noise.
+    """
+    return comment.get("in_reply_to_id") is None
+
+
 def mine_review_comments(
     client: GitHubClient,
     owner: str,
@@ -80,11 +100,18 @@ def _cases_for_pr(client: GitHubClient, owner: str, repo: str, pr: dict, *, nega
         logger.warning("Could not fetch review comments for PR #%s: %s", number, e)
         comments = []
 
-    commented_paths: set[str] = set()
+    # A file that drew any substantive human attention — even in a reply —
+    # is not a safe "clean" negative, so exclude it from the negative pool.
+    # Positive cases, though, come only from thread roots (see is_thread_root).
+    commented_paths: set[str] = {
+        c["path"] for c in comments if is_substantive_comment(c.get("body", ""))
+    }
+
     for c in comments:
+        if not is_thread_root(c):
+            continue
         if not is_substantive_comment(c.get("body", "")):
             continue
-        commented_paths.add(c["path"])
         yield Case(
             id=make_case_id("review_comment", owner, repo, str(number), c["path"], str(c["id"])),
             repo=f"{owner}/{repo}",
