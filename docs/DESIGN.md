@@ -112,9 +112,84 @@ informational observation rather than a defect flag ("Tested on my repo,
 works both from the tab…"). That is a smaller and harder problem than the
 systematic reply noise, and it is the kind of thing the Phase 3
 LLM-as-judge semantic match is meant to catch, not a keyword heuristic.
-The verification error rate on positives should be re-measured on a full
-authenticated run before the dataset is used for scoring; the number above
-is from an unauthenticated ~20-PR scan and is directional, not final.
+
+### Second measurement (full authenticated run, 300 PRs)
+
+The full run produced **391 cases (111 defect / 280 no_defect)** from
+`psf/requests` — above the 200-case floor. A hand-classification of a
+random 40-positive sample (seed 42) gives:
+
+| Reading | Precision | Label error rate |
+|---|---|---|
+| Strict (only unambiguous defect flags) | 8/40 = **20%** | 80% |
+| Generous (counting borderline suggestions/questions) | 17/40 = **43%** | 57% |
+
+**Thread-root filtering did not lower the error rate — it changed the
+composition of the error.** The reply chatter is gone; what remains is the
+underlying comment population of a mature, well-reviewed repo, which is
+mostly style nits ("can we add an empty line before `__init__`", "we can
+unindent this to align with `with`"), scoping questions ("`object` or
+`Any`?", "do we need `u'...'`?"), and informational discussion. Those are
+real review comments — they are just not defect reports.
+
+The honest conclusion: **`review_comment` alone does not produce a dataset
+usable for scoring.** Its positives need semantic filtering, not lexical
+filtering. This is a stronger statement than the CodeReviewer framing
+("comments are approximately defects") and it is worth stating plainly,
+because it is a result, not a setback.
+
+### Bot and AI-reviewer contamination (the circularity problem)
+
+The same sample surfaced a failure mode specific to this project. Of 113
+root comments across the 47 PRs carrying defect labels, **5 came from
+`github-advanced-security[bot]`** (CodeQL security findings), and three
+more on PR #7431 are formatted as AI-code-review output:
+
+```
+⚠️ **HIGH** — *test_coverage* **Confidence:** 80%
+New logic for handling MutableMapping in Request.headers is not tested.
+```
+
+Those three were posted by `sdm0p`, whose GitHub `user.type` is **`User`,
+not `Bot`** — so the obvious defence (drop anything where
+`user.type == "Bot"`) does not catch them.
+
+This matters more than the raw percentage suggests. **Benchmarking an AI
+code reviewer against ground truth that contains another AI code
+reviewer's output is circular** — the score stops measuring "did it find
+the bug" and starts measuring "did it agree with the other tool." This is
+the SWE-Bench+ failure mode wearing a different costume, exactly as the
+project scoping predicted, and it is not something any of the prior art
+(SWR-Bench, CodeReviewer, Qodo's benchmark) appears to control for.
+
+Blocking gap: **the `Case` schema does not record the comment author at
+all**, so today the contamination cannot even be filtered or reported. The
+schema needs `comment_author` and `comment_author_type`, and the miner
+needs a heuristic for AI-generated comments posted from user accounts
+(structured severity/confidence headers are a strong signal).
+
+### Status
+
+On the strength of these two measurements, **no dataset produced by this
+tool should be used to score a reviewer yet.** The pipeline is sound; the
+labels are not. Fixes are tracked in the next section.
+
+## Known defects (measured, not yet fixed)
+
+1. **Fixup miner recognizes ~1 in 8 real reverts.** `_is_revert_pr` matches
+   only GitHub's auto-generated `This reverts commit <sha>` footer. Of 8
+   merged revert PRs sampled from `psf/requests`, 1 had that footer; 5
+   referenced the reverted PR by number instead (`Reverts owner/repo#2442`,
+   "will revert #3362"), and 2 referenced neither cleanly. The full
+   300-PR run produced **zero** fixup cases. Fix: resolve PR-number
+   references in revert-titled PRs, in addition to the SHA footer.
+   (Separately, all 11 of this repo's reverts predate the 300-most-recent
+   window, so a deeper scan is also needed — but the pattern gap is the
+   real defect.)
+2. **Positive labels are ~57-80% non-defects.** See above. Needs semantic
+   filtering.
+3. **No author recorded, so bot/AI comments cannot be excluded.** See
+   above. Needs a schema field plus an AI-output heuristic.
 
 ## Non-goals for Phase 1
 
