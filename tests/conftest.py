@@ -10,10 +10,28 @@ from typing import Any, Iterator
 
 
 class FakeClient:
-    def __init__(self, paginated: dict[str, list[dict]] | None = None, resources: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        paginated: dict[str, list[dict]] | None = None,
+        resources: dict[str, Any] | None = None,
+        search_results: list[dict] | None = None,
+    ) -> None:
         self.paginated = paginated or {}
         self.resources = resources or {}
+        self.search_results = search_results
         self.calls: list[str] = []
+        self.queries: list[str] = []
+
+    def search_issues(self, query: str, *, per_page: int = 100, max_results: int | None = None):
+        self.queries.append(query)
+        if self.search_results is None:
+            from reviewbench.github_client import GitHubError
+
+            raise GitHubError("search not configured on this FakeClient")
+        results = self.search_results
+        if max_results is not None:
+            results = results[:max_results]
+        yield from results
 
     def get(self, path: str, params: dict | None = None) -> Any:
         self.calls.append(path)

@@ -176,20 +176,63 @@ labels are not. Fixes are tracked in the next section.
 
 ## Known defects (measured, not yet fixed)
 
-1. **Fixup miner recognizes ~1 in 8 real reverts.** `_is_revert_pr` matches
-   only GitHub's auto-generated `This reverts commit <sha>` footer. Of 8
-   merged revert PRs sampled from `psf/requests`, 1 had that footer; 5
-   referenced the reverted PR by number instead (`Reverts owner/repo#2442`,
-   "will revert #3362"), and 2 referenced neither cleanly. The full
-   300-PR run produced **zero** fixup cases. Fix: resolve PR-number
-   references in revert-titled PRs, in addition to the SHA footer.
-   (Separately, all 11 of this repo's reverts predate the 300-most-recent
-   window, so a deeper scan is also needed — but the pattern gap is the
-   real defect.)
+1. ~~**Fixup miner recognizes ~1 in 8 real reverts.**~~ **Fixed.** See
+   "Fixup miner, after the fix" below.
 2. **Positive labels are ~57-80% non-defects.** See above. Needs semantic
    filtering.
 3. **No author recorded, so bot/AI comments cannot be excluded.** See
    above. Needs a schema field plus an AI-output heuristic.
+4. **Fixup cases are labelled per-file, including incidental files.** New,
+   found while verifying the fix. See below.
+
+## Fixup miner, after the fix
+
+Two changes: `extract_revert_targets` now resolves PR-number references
+(`Reverts owner/repo#2442`, "reverts the changes from #6667") alongside the
+SHA footer, and discovery moved from a recency scan to a GitHub search
+query. The second change matters as much as the first — every one of this
+repo's reverts predates its 300 most recent PRs, so no amount of pattern
+matching would have found them by walking recent history.
+
+Result on `psf/requests`: **0 → 10 cases across 6 origin PRs**, and the run
+went from 6m23s to 12s (one search query beats paging thousands of PRs).
+Both reference styles resolve: PR #3738 via the SHA footer, the rest via
+PR-number references.
+
+Precision guard worth keeping: PR-number references are only trusted when
+the *title* also signals a revert, and only when the number is adjacent to
+a revert verb. Real bodies cite issues they also address — "This addresses
+#3481 and will revert #3362 back to its prior state" must yield #3362 and
+not #3481, or the miner labels an innocent PR as defective.
+
+### New defect found while verifying (defect 4 above)
+
+Hand-inspecting all 10 cases shows the miner marks **every file in the
+reverted PR** as a defect case, including files no reviewer could
+meaningfully have flagged:
+
+| Origin PR | File | Plausible defect location? |
+|---|---|---|
+| #6667 | `src/requests/adapters.py` | yes — the SSLContext concurrency bug |
+| #3362 | `requests/utils.py`, `tests/test_requests.py` | yes |
+| #2442 | `requests/cacert.pem` (78 KB of PEM) | **no** — a data blob |
+| #2513 | `AUTHORS.rst` | **no** — a name addition |
+| #3713 | `requests/models.py`, tests | yes |
+| #3700 | `README.rst`, `docs/index.rst` | **no** — and the revert was a
+  preference call about a docs snippet, not a bug at all |
+
+That is **4 of 10 cases on files that cannot carry the defect**, and one
+origin PR (#3700) that was reverted for editorial preference rather than
+any defect. Roughly 40% questionable — notably better than
+`review_comment`'s 57-80%, which supports the design doc's ordering of
+these sources by signal strength, but not good enough to use unfiltered.
+
+This is the localization problem from the top of this document showing up
+in the dataset itself rather than in a reviewer's output: a case must name
+the file where the defect actually lives, or scoring against it rewards
+noise. Fixes needed: exclude non-code paths (docs, data blobs, AUTHORS,
+changelogs) from fixup cases, and treat "reverted" as necessary but not
+sufficient — the revert's stated reason still has to be a defect.
 
 ## Non-goals for Phase 1
 

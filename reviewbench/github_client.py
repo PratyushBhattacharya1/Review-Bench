@@ -54,6 +54,40 @@ class GitHubClient:
             url = _next_link(resp.headers.get("Link"))
             params = None  # subsequent URLs from Link header already carry query params
 
+    def search_issues(
+        self, query: str, *, per_page: int = 100, max_results: int | None = None
+    ) -> Iterator[dict]:
+        """Yield issues/PRs matching a GitHub search query.
+
+        Separate from `get_paginated` because the search endpoints wrap
+        results in an envelope (`{total_count, items: [...]}`) rather than
+        returning a bare list, and paginate by `page` number rather than by
+        `Link` header alone.
+
+        Search exists here because some things are needle-in-haystack: a
+        repo's revert PRs may be thousands of PRs deep in its history, and
+        walking the whole list to find a handful of them is both slow and a
+        good way to burn a rate-limit budget.
+        """
+        page = 1
+        yielded = 0
+        while True:
+            body = self.get(
+                "/search/issues", {"q": query, "per_page": per_page, "page": page}
+            )
+            items = body.get("items", [])
+            if not items:
+                return
+            for item in items:
+                yield item
+                yielded += 1
+                if max_results is not None and yielded >= max_results:
+                    return
+            # The search API caps out at 1000 results regardless of matches.
+            if len(items) < per_page or yielded >= 1000:
+                return
+            page += 1
+
     def _request(self, path: str, params: dict[str, Any] | None) -> requests.Response:
         return self._request_url(f"{API_ROOT}{path}", params)
 
