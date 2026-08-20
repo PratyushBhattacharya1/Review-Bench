@@ -18,6 +18,7 @@ from typing import Iterator
 from reviewbench.github_client import GitHubClient, GitHubError
 from reviewbench.miners.review_comment_miner import is_substantive_comment
 from reviewbench.models import Case, make_case_id
+from reviewbench.paths import is_reviewable_code_path
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,11 @@ def mine_clean_hunks(
                 # Too small to hide a meaningful bug in.
                 continue
             if f["filename"] in commented_paths:
+                continue
+            if not is_reviewable_code_path(f["filename"]):
+                # Injecting a bug into a changelog or a CI config would
+                # produce a case that is out of scope before the model is
+                # even called — and would still cost an API request.
                 continue
 
             emitted += 1

@@ -17,6 +17,7 @@ from typing import Iterator, NamedTuple
 
 from reviewbench.github_client import GitHubClient, GitHubError
 from reviewbench.models import Case, make_case_id
+from reviewbench.paths import is_reviewable_code_path
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,12 @@ def _cases_for_origin_pr(client: GitHubClient, owner: str, repo: str, origin_pr:
         if not patch:
             # Binary file or diff too large for GitHub to include a patch;
             # nothing to score a reviewer's line-level output against.
+            continue
+        if not is_reviewable_code_path(f["filename"]):
+            # A reverted PR touches changelogs, docs and data files
+            # alongside the code that actually broke. Labelling those as
+            # defects asks a question with no right answer.
+            logger.debug("Skipping non-code path %s in PR #%s", f["filename"], number)
             continue
         yield Case(
             id=make_case_id("fixup", owner, repo, str(number), f["filename"]),

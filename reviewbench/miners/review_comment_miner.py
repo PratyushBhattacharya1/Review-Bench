@@ -20,6 +20,7 @@ from typing import Iterator
 
 from reviewbench.github_client import GitHubClient, GitHubError
 from reviewbench.models import Case, make_case_id
+from reviewbench.paths import is_reviewable_code_path
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,8 @@ def _cases_for_pr(client: GitHubClient, owner: str, repo: str, pr: dict, *, nega
             continue
         if not is_substantive_comment(c.get("body", "")):
             continue
+        if not is_reviewable_code_path(c["path"]):
+            continue
         yield Case(
             id=make_case_id("review_comment", owner, repo, str(number), c["path"], str(c["id"])),
             repo=f"{owner}/{repo}",
@@ -138,7 +141,13 @@ def _cases_for_pr(client: GitHubClient, owner: str, repo: str, pr: dict, *, nega
         logger.warning("Could not fetch files for PR #%s: %s", number, e)
         return
 
-    uncommented = [f for f in files if f["filename"] not in commented_paths and f.get("patch")]
+    uncommented = [
+        f
+        for f in files
+        if f["filename"] not in commented_paths
+        and f.get("patch")
+        and is_reviewable_code_path(f["filename"])
+    ]
     for f in uncommented[:negatives_per_pr]:
         yield Case(
             id=make_case_id("review_comment_neg", owner, repo, str(number), f["filename"]),

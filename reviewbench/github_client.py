@@ -9,12 +9,16 @@ and backing off on rate limits instead of crashing mid-run.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Iterator
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 API_ROOT = "https://api.github.com"
+MAX_TRANSIENT_RETRIES = 4
 
 
 class GitHubError(RuntimeError):
@@ -92,13 +96,47 @@ class GitHubClient:
         return self._request_url(f"{API_ROOT}{path}", params)
 
     def _request_url(self, url: str, params: dict[str, Any] | None) -> requests.Response:
+        transient_failures = 0
         while True:
-            resp = self._session.get(url, params=params, timeout=30)
+            try:
+                resp = self._session.get(url, params=params, timeout=30)
+            except (requests.ConnectionError, requests.Timeout) as e:
+                # A full-repo scan is thousands of requests over several
+                # minutes, so an occasional dropped connection is expected
+                # rather than exceptional. Without this the whole run dies
+                # partway through and writes nothing — which is exactly
+                # what happened on the first filtered run against
+                # psf/requests, three minutes in.
+                transient_failures += 1
+                if transient_failures > MAX_TRANSIENT_RETRIES:
+                    raise GitHubError(
+                        f"Giving up on {url} after {MAX_TRANSIENT_RETRIES} network failures: {e}"
+                    ) from e
+                backoff = 2 ** (transient_failures - 1)
+                logger.warning(
+                    "Network error on %s (attempt %d/%d), retrying in %ds: %s",
+                    url,
+                    transient_failures,
+                    MAX_TRANSIENT_RETRIES,
+                    backoff,
+                    e,
+                )
+                self._sleep(backoff)
+                continue
+
             if resp.status_code == 403 and _is_rate_limited(resp):
                 self._wait_for_rate_limit(resp)
                 continue
             if resp.status_code == 404:
                 raise GitHubError(f"404 Not Found: {url}")
+            if resp.status_code >= 500:
+                # Server-side blips get the same treatment as dropped
+                # connections: retry rather than lose the run.
+                transient_failures += 1
+                if transient_failures > MAX_TRANSIENT_RETRIES:
+                    raise GitHubError(f"GitHub API error {resp.status_code} for {url} (retries exhausted)")
+                self._sleep(2 ** (transient_failures - 1))
+                continue
             if not resp.ok:
                 raise GitHubError(f"GitHub API error {resp.status_code} for {url}: {resp.text[:500]}")
             return resp

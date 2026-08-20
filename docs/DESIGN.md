@@ -178,12 +178,12 @@ labels are not. Fixes are tracked in the next section.
 
 1. ~~**Fixup miner recognizes ~1 in 8 real reverts.**~~ **Fixed.** See
    "Fixup miner, after the fix" below.
-2. **Positive labels are ~57-80% non-defects.** See above. Needs semantic
-   filtering.
+2. **Positive labels are ~53-80% non-defects.** Unchanged by path
+   filtering — see "Third measurement" below. Needs semantic filtering.
 3. **No author recorded, so bot/AI comments cannot be excluded.** See
    above. Needs a schema field plus an AI-output heuristic.
-4. **Fixup cases are labelled per-file, including incidental files.** New,
-   found while verifying the fix. See below.
+4. ~~**Fixup cases are labelled per-file, including incidental files.**~~
+   **Fixed** by the shared path filter — see below.
 
 ## Fixup miner, after the fix
 
@@ -263,3 +263,73 @@ configs times several iterations of the pipeline. Three decisions follow:
    synthetic coverage they had not paid for.
 3. **`--synthetic-limit` defaults to 50**, not unlimited. The default
    should be a number someone can afford to run by accident.
+
+## Scope filtering, and the third measurement
+
+Verifying defect 4 turned up something larger than defect 4. Phase 0 scoped
+this project to Python, but **59% of the first full run (232 of 391 cases)
+sat on non-Python files** — CI YAML, changelogs, issue templates,
+`pyproject.toml`, a stray `.coverage.<host>.<pid>` artifact someone
+committed by accident, and 78 KB of PEM certificate data.
+
+Two different problems were hiding in that one number, and it is worth
+keeping them separate:
+
+- **Out of scope.** A `no_defect` case on `.github/dependabot.yml` is not
+  wrong, it is meaningless — it measures reviewer behaviour on a file type
+  the benchmark never claimed to cover.
+- **Unanswerable.** `cacert.pem` and `AUTHORS.rst` were labelled `defect`
+  because the PR containing them was reverted. There is no bug in a name
+  list. Scoring against those cases punishes a reviewer for being right.
+
+`reviewbench/paths.py` (`is_reviewable_code_path`) now gates every miner —
+both label sources and the synthetic injection candidates. Filtering at
+mining time rather than at scoring time is deliberate: a case that cannot
+be answered correctly should never enter the dataset, so the published case
+count means what it claims.
+
+### Results
+
+| | Before | After |
+|---|---|---|
+| Total cases | 391 | 207 |
+| Non-Python cases | 232 (59%) | **0** |
+| Fixup cases | 10 | 6 |
+| Fixup cases on unreviewable files | 4 of 10 (40%) | **0 of 6** |
+
+All four unreviewable fixup cases are gone, and origin PR #3700 — reverted
+over an editorial preference about a README snippet, never a defect —
+dropped out entirely because both its files were documentation. The
+remaining six fixup cases all sit on files that plausibly carry the defect
+(`adapters.py`, `utils.py`, `models.py`, `connectionpool.py`, and two test
+files). Small N, but clean.
+
+### The part that did not improve
+
+A second hand-classification of 40 `review_comment` positives (seed 42,
+post-filter) gives **20% strict / 47.5% generous precision** — statistically
+indistinguishable from the 20% / 43% measured before filtering.
+
+This is the honest result and it should not be buried: **path filtering
+fixed scope and fixed `fixup`, and did nothing for `review_comment` label
+quality.** That follows once stated plainly — the noise there was never
+about file type. It is about comment intent, and a `.py` file attracts
+nits ("Nit: `HookType` doesn't need to be quotes", "the last sentence still
+needs a period"), author self-explanations ("this change is needed
+because…"), approvals ("That's good, this appears to be the same way
+urllib3 handles it"), and feature requests just as readily as a `.rst` file
+does. No path-based or keyword-based rule separates those from a defect
+report; only reading the comment does.
+
+Bot contamination also **rose** as a share, from 4/40 to 3/40 — restricting
+to `.py` concentrates it, because CodeQL and AI review bots comment on code
+and not on changelogs.
+
+### Where that leaves the dataset
+
+`fixup` is now clean enough to use, and too small to use alone (6 cases from
+this repo). `review_comment` is large enough and not clean enough. Both
+statements have to be fixed before Phase 3 scoring means anything, and
+neither is fixed by another heuristic — the next move on defect 2 is the
+LLM judge, which is Phase 3 work pulled forward, and on defect 3 a schema
+change plus an AI-output detector.
