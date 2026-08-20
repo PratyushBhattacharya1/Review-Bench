@@ -23,11 +23,20 @@ This project is being built in public phases. Current state:
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Scoping, README, design doc | done |
-| 1 | Dataset builder (all three ground-truth sources) | done — not yet run against a real repo |
+| 1 | Dataset builder (all three ground-truth sources) | code complete; **labels not yet trustworthy** — see below |
 | 2 | Runner + adapters (raw model APIs, PR-Agent) | not started |
 | 3 | Scoring (detection, localization, noise rate, LLM-judge) | not started |
 | 4 | Ship (Docker, GitHub Action, results site) | not started |
 | 5 | Write-up | not started |
+
+**Current blocker, stated plainly: no dataset this tool produces should be
+used to score a reviewer yet.** The pipeline runs end to end against a real
+repo; the labels it produces do not hold up to hand-verification. On
+`psf/requests`, `review_comment` positives measure 20% precision (strict) /
+47.5% (generous), and `fixup` yields only 6 cases from the whole repo
+history. Every measurement, and the three open defects behind them, are in
+[docs/DESIGN.md](docs/DESIGN.md). Fixing label quality is the work that
+gates Phase 3.
 
 Ground truth comes from three sources, of ascending difficulty to mine. See
 [docs/DESIGN.md](docs/DESIGN.md) for the full rationale, including how this
