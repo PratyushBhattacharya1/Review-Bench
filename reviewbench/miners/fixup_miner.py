@@ -21,6 +21,24 @@ from reviewbench.paths import is_reviewable_code_path
 
 logger = logging.getLogger(__name__)
 
+# A reverted PR touching this many reviewable files is a large refactor or
+# sweep, not a localizable defect. Every file in it gets labelled `defect`,
+# but the bug lives in one or two — measured on django/django, PR #8031
+# alone contributed 67 cases, 23% of a 289-case corpus, of which at most a
+# couple can hold the defect. Same principle as the path filter: a case that
+# cannot be answered correctly should not enter the dataset.
+MAX_FILES_PER_REVERTED_PR = 10
+
+# A revert that itself closes a bug ticket is strong evidence the thing it
+# reverted was defective, rather than descoped or reverted for policy.
+# Django's convention makes this explicit ("Fixed #33159 -- Reverted ...").
+# Recorded rather than required: a revert without a ticket may still be a
+# real defect, so this stratifies the corpus instead of shrinking it.
+_REVERT_CITES_TICKET_RE = re.compile(r"\b(?:fixed|fixes|closes|refs)\s+#\d+", re.IGNORECASE)
+
+# Straight, curly and single quotes — revert titles use all three.
+_QUOTED_SPAN_RE = re.compile(r"[\"“‘'][^\"”’']*[\"”’']")
+
 _REVERT_COMMIT_RE = re.compile(r"This reverts commit ([0-9a-f]{40})", re.IGNORECASE)
 _REVERT_TITLE_RE = re.compile(r"\brevert(s|ed|ing)?\b", re.IGNORECASE)
 
@@ -216,6 +234,25 @@ def mine_fixups(
             )
 
 
+def _revert_cites_ticket(revert_pr: dict) -> bool:
+    """True if the revert PR's *own* reason cites a bug ticket.
+
+    Quoted spans are stripped first, and that is the whole subtlety. A
+    revert title routinely quotes the title of the PR it is undoing:
+
+        Revert "Fixed #25417 -- Added a field check for invalid defaults."
+
+    The `Fixed #25417` there belongs to the *reverted* PR, not to the
+    revert. Matching it would invert the signal — it says the original PR
+    fixed a bug, and this revert undid that fix, which is close to the
+    opposite of the evidence we are looking for. Found while hand-verifying
+    the multi-repo corpus (django/django#5303).
+    """
+    blurb = " ".join([revert_pr.get("title") or "", revert_pr.get("body") or ""])
+    unquoted = _QUOTED_SPAN_RE.sub(" ", blurb)
+    return bool(_REVERT_CITES_TICKET_RE.search(unquoted))
+
+
 def _cases_for_origin_pr(client: GitHubClient, owner: str, repo: str, origin_pr: dict, *, revert_pr: dict) -> Iterator[Case]:
     number = origin_pr["number"]
     try:
@@ -227,18 +264,29 @@ def _cases_for_origin_pr(client: GitHubClient, owner: str, repo: str, origin_pr:
     base_sha = origin_pr.get("base", {}).get("sha", "")
     head_sha = origin_pr.get("head", {}).get("sha", "")
 
-    for f in files:
-        patch = f.get("patch")
-        if not patch:
-            # Binary file or diff too large for GitHub to include a patch;
-            # nothing to score a reviewer's line-level output against.
-            continue
-        if not is_reviewable_code_path(f["filename"]):
-            # A reverted PR touches changelogs, docs and data files
-            # alongside the code that actually broke. Labelling those as
-            # defects asks a question with no right answer.
-            logger.debug("Skipping non-code path %s in PR #%s", f["filename"], number)
-            continue
+    # A reverted PR touches changelogs, docs and data files alongside the
+    # code that actually broke. Labelling those as defects asks a question
+    # with no right answer.
+    reviewable = [
+        f for f in files if f.get("patch") and is_reviewable_code_path(f["filename"])
+    ]
+
+    if len(reviewable) > MAX_FILES_PER_REVERTED_PR:
+        # Too large to localize. Emitting one `defect` case per file would
+        # mark dozens of innocent files as buggy and drown the corpus — see
+        # MAX_FILES_PER_REVERTED_PR.
+        logger.info(
+            "Skipping origin PR #%s: %d reviewable files exceeds the localizable limit of %d",
+            number,
+            len(reviewable),
+            MAX_FILES_PER_REVERTED_PR,
+        )
+        return
+
+    cites_ticket = _revert_cites_ticket(revert_pr)
+
+    for f in reviewable:
+        patch = f["patch"]
         yield Case(
             id=make_case_id("fixup", owner, repo, str(number), f["filename"]),
             repo=f"{owner}/{repo}",
@@ -249,7 +297,10 @@ def _cases_for_origin_pr(client: GitHubClient, owner: str, repo: str, origin_pr:
             diff_hunk=patch,
             base_commit_sha=base_sha,
             head_commit_sha=head_sha,
-            defect_category=None,
+            # Stratification signal, not a defect taxonomy: a revert that
+            # itself closes a bug ticket is much likelier to be undoing a
+            # real defect than one reverting for scope or policy.
+            defect_category="reverted_with_ticket" if cites_ticket else "reverted",
             context=f"Reverted by PR #{revert_pr['number']}: {revert_pr.get('title', '')}",
             human_comment=None,
             source_urls=[origin_pr.get("html_url", ""), revert_pr.get("html_url", "")],

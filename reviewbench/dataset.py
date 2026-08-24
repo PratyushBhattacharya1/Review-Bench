@@ -1,12 +1,12 @@
-"""Orchestrates the miners into a single JSONL dataset for one repo."""
+"""Orchestrates the miners into a single JSONL dataset across one or more repos."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
-from reviewbench.github_client import GitHubClient
+from reviewbench.github_client import GitHubClient, GitHubError
 from reviewbench.miners.clean_pr_miner import mine_clean_hunks
 from reviewbench.miners.fixup_miner import mine_fixups
 from reviewbench.miners.review_comment_miner import mine_review_comments
@@ -67,10 +67,17 @@ def build_dataset(
         yield from miner(client, owner, repo, pr_scan_limit=pr_scan_limit, **extra)
 
 
+def parse_repo(spec: str) -> tuple[str, str]:
+    """Split an "owner/name" spec, raising a clear error if it is malformed."""
+    if spec.count("/") != 1 or not all(spec.split("/")):
+        raise ValueError(f"--repo must be 'owner/name', got {spec!r}")
+    owner, name = spec.split("/")
+    return owner, name
+
+
 def build_and_write(
     client: GitHubClient,
-    owner: str,
-    repo: str,
+    repos: list[str],
     out_path: str | Path,
     *,
     sources: list[str],
@@ -78,30 +85,53 @@ def build_and_write(
     model_client: StructuredModelClient | None = None,
     synthetic_limit: int | None = None,
     keep_machine_authored: bool = False,
-) -> dict[str, int]:
-    """Build the dataset and write it to `out_path`. Returns a summary
-    dict with total case count and a per-provenance/per-label breakdown,
-    which the CLI prints (including the low-N warning from docs/DESIGN.md).
+) -> dict[str, Any]:
+    """Mine every repo in `repos` into one dataset at `out_path`.
+
+    Returns a summary broken down by provenance, label, and repo. The
+    per-repo breakdown matters because label quality is not repo-invariant:
+    a repo that reverts to unblock CI produces different `fixup` precision
+    than one that reverts only for defects, and pooling would hide that.
+
+    One repo failing does not end the run. A 4-repo scan is tens of minutes
+    of API calls, and losing all of it because the third repo 404s would be
+    the same failure mode as the dropped connection that GitHubClient now
+    retries.
     """
-    cases = list(
-        build_dataset(
-            client,
-            owner,
-            repo,
-            sources=sources,
-            pr_scan_limit=pr_scan_limit,
-            model_client=model_client,
-            synthetic_limit=synthetic_limit,
-            keep_machine_authored=keep_machine_authored,
-        )
-    )
+    cases: list[Case] = []
+    failures: dict[str, str] = {}
+
+    for spec in repos:
+        owner, name = parse_repo(spec)
+        logger.info("Mining %s/%s", owner, name)
+        try:
+            cases.extend(
+                build_dataset(
+                    client,
+                    owner,
+                    name,
+                    sources=sources,
+                    pr_scan_limit=pr_scan_limit,
+                    model_client=model_client,
+                    synthetic_limit=synthetic_limit,
+                    keep_machine_authored=keep_machine_authored,
+                )
+            )
+        except GitHubError as e:
+            logger.error("Mining %s/%s failed, continuing: %s", owner, name, e)
+            failures[spec] = str(e)
+
     written = write_jsonl(cases, out_path)
 
     by_provenance: dict[str, int] = {}
     by_label: dict[str, int] = {}
+    by_repo: dict[str, dict[str, int]] = {}
     for case in cases:
         by_provenance[case.provenance] = by_provenance.get(case.provenance, 0) + 1
         by_label[case.label] = by_label.get(case.label, 0) + 1
+        repo_counts = by_repo.setdefault(case.repo, {})
+        repo_counts["total"] = repo_counts.get("total", 0) + 1
+        repo_counts[case.provenance] = repo_counts.get(case.provenance, 0) + 1
 
     if written < MIN_RECOMMENDED_CASES:
         logger.warning(
@@ -111,4 +141,10 @@ def build_and_write(
             MIN_RECOMMENDED_CASES,
         )
 
-    return {"total": written, "by_provenance": by_provenance, "by_label": by_label}
+    return {
+        "total": written,
+        "by_provenance": by_provenance,
+        "by_label": by_label,
+        "by_repo": by_repo,
+        "failures": failures,
+    }

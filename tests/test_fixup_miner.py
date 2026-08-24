@@ -1,6 +1,11 @@
 from tests.conftest import FakeClient
 
-from reviewbench.miners.fixup_miner import extract_revert_targets, mine_fixups
+from reviewbench.miners.fixup_miner import (
+    MAX_FILES_PER_REVERTED_PR,
+    _revert_cites_ticket,
+    extract_revert_targets,
+    mine_fixups,
+)
 
 SHA = "a" * 40
 
@@ -205,3 +210,97 @@ def test_falls_back_to_recency_scan_when_search_unavailable():
 
     assert len(cases) == 1
     assert cases[0].pr_number == 7
+
+
+# --- Localizability and revert-reason signal -----------------------------
+
+
+def _origin_with_files(n_files: int, revert_title="Revert thing", revert_body="") -> FakeClient:
+    revert_pr = {
+        "number": 100, "title": revert_title, "body": revert_body or "Reverts #50",
+        "html_url": "https://github.com/owner/repo/pull/100",
+    }
+    origin_pr = {
+        "number": 50, "merged_at": "2025-01-01T00:00:00Z",
+        "html_url": "https://github.com/owner/repo/pull/50",
+        "base": {"sha": "b"}, "head": {"sha": "h"},
+    }
+    files = [{"filename": f"mod{i}.py", "patch": "@@ -1 +1 @@\n-a\n+b"} for i in range(n_files)]
+    return FakeClient(
+        paginated={"/repos/owner/repo/pulls/50/files": files},
+        resources={"/repos/owner/repo/pulls/50": origin_pr},
+        search_results=[revert_pr],
+    )
+
+
+def test_small_reverted_pr_yields_a_case_per_file():
+    cases = list(mine_fixups(_origin_with_files(3), "owner", "repo"))
+    assert len(cases) == 3
+
+
+def test_oversized_reverted_pr_is_skipped_entirely():
+    # django/django#8031 contributed 67 cases — 23% of a 289-case corpus —
+    # all labelled defect though the bug lives in one or two files.
+    client = _origin_with_files(MAX_FILES_PER_REVERTED_PR + 1)
+    assert list(mine_fixups(client, "owner", "repo")) == []
+
+
+def test_boundary_is_inclusive():
+    client = _origin_with_files(MAX_FILES_PER_REVERTED_PR)
+    assert len(list(mine_fixups(client, "owner", "repo"))) == MAX_FILES_PER_REVERTED_PR
+
+
+def test_non_code_files_do_not_count_toward_the_limit():
+    # 3 Python files plus a pile of changelog noise stays localizable.
+    revert_pr = {"number": 100, "title": "Revert thing", "body": "Reverts #50",
+                 "html_url": "u"}
+    origin_pr = {"number": 50, "merged_at": "2025-01-01T00:00:00Z", "html_url": "u",
+                 "base": {"sha": "b"}, "head": {"sha": "h"}}
+    files = [{"filename": f"mod{i}.py", "patch": "p"} for i in range(3)]
+    files += [{"filename": f"docs/page{i}.rst", "patch": "p"} for i in range(20)]
+    client = FakeClient(
+        paginated={"/repos/owner/repo/pulls/50/files": files},
+        resources={"/repos/owner/repo/pulls/50": origin_pr},
+        search_results=[revert_pr],
+    )
+
+    cases = list(mine_fixups(client, "owner", "repo"))
+
+    assert len(cases) == 3
+    assert all(c.file_path.endswith(".py") for c in cases)
+
+
+def test_revert_citing_a_ticket_is_marked():
+    # Django's convention: "Fixed #33159 -- Reverted ..." — the revert itself
+    # closes a bug, strong evidence the reverted PR was defective.
+    client = _origin_with_files(2, revert_title="Fixed #33159 -- Reverted \"Simplified middleware\"")
+    cases = list(mine_fixups(client, "owner", "repo"))
+    assert {c.defect_category for c in cases} == {"reverted_with_ticket"}
+
+
+def test_revert_without_a_ticket_is_marked_differently():
+    client = _origin_with_files(2, revert_title="Revert \"Add podman module\"")
+    cases = list(mine_fixups(client, "owner", "repo"))
+    assert {c.defect_category for c in cases} == {"reverted"}
+
+
+def test_ticket_in_the_quoted_original_title_is_not_the_reverts_own_reason():
+    # django/django#5303, found during multi-repo verification:
+    #   Revert "Fixed #25417 -- Added a field check for invalid default values."
+    # The ticket belongs to the PR being reverted. Counting it inverts the
+    # signal — it says the original fixed a bug and this revert undid it.
+    assert not _revert_cites_ticket(
+        {"title": 'Revert "Fixed #25417 -- Added a field check"', "body": ""}
+    )
+
+
+def test_reverts_own_ticket_still_counts_alongside_a_quoted_one():
+    # django/django#15510: the revert closes two tickets while quoting a
+    # reverted title that also cites one.
+    assert _revert_cites_ticket(
+        {"title": 'Fixed #33955 -- Reverted "Fixed #32565 -- Moved URLResolver"', "body": ""}
+    )
+
+
+def test_ticket_cited_in_the_revert_body_counts():
+    assert _revert_cites_ticket({"title": "Revert the thing", "body": "Fixes #4242 as well."})

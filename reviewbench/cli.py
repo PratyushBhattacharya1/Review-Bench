@@ -11,16 +11,22 @@ import os
 import sys
 
 from reviewbench.cache import DEFAULT_CACHE_DIR, ResponseCache
-from reviewbench.dataset import build_and_write
+from reviewbench.dataset import build_and_write, parse_repo
 from reviewbench.github_client import GitHubClient
 from reviewbench.model_client import DEFAULT_MODEL, AnthropicClient
 
 
 def _build_dataset_command(args: argparse.Namespace) -> int:
-    if "/" not in args.repo:
-        print(f"error: --repo must be 'owner/name', got {args.repo!r}", file=sys.stderr)
+    repos = [r.strip() for r in args.repo.split(",") if r.strip()]
+    if not repos:
+        print("error: --repo requires at least one 'owner/name'", file=sys.stderr)
         return 2
-    owner, repo = args.repo.split("/", 1)
+    try:
+        for spec in repos:
+            parse_repo(spec)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     token = args.token or os.environ.get("GITHUB_TOKEN")
     if not token:
@@ -47,8 +53,7 @@ def _build_dataset_command(args: argparse.Namespace) -> int:
 
     summary = build_and_write(
         client,
-        owner,
-        repo,
+        repos,
         args.out,
         sources=sources,
         pr_scan_limit=args.limit,
@@ -60,6 +65,15 @@ def _build_dataset_command(args: argparse.Namespace) -> int:
     print(f"Wrote {summary['total']} cases to {args.out}")
     print(f"  by provenance: {summary['by_provenance']}")
     print(f"  by label:      {summary['by_label']}")
+    if len(summary["by_repo"]) > 1:
+        print("  by repo:")
+        for repo_name, counts in sorted(summary["by_repo"].items()):
+            breakdown = ", ".join(
+                f"{k}={v}" for k, v in sorted(counts.items()) if k != "total"
+            )
+            print(f"      {repo_name:28} {counts['total']:5}  ({breakdown})")
+    for spec, err in summary.get("failures", {}).items():
+        print(f"  WARNING: {spec} failed and was skipped: {err}", file=sys.stderr)
     if cache is not None:
         print(f"  model cache:   {cache.stats}")
     if summary["by_provenance"].get("synthetic"):
@@ -76,7 +90,11 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build = subparsers.add_parser("build-dataset", help="mine a repo's PR history into a JSONL dataset")
-    build.add_argument("--repo", required=True, help="owner/name, e.g. psf/requests")
+    build.add_argument(
+        "--repo",
+        required=True,
+        help="owner/name, or a comma-separated list: psf/requests,django/django",
+    )
     build.add_argument("--out", required=True, help="output JSONL path")
     build.add_argument(
         "--sources",

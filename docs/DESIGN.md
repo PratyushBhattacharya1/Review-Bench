@@ -63,7 +63,7 @@ Concretely, this shows up in two places:
 
 | Source | Signal strength | Known weakness |
 |---|---|---|
-| Fixup/revert mining | Highest — a human explicitly undid this PR | Reverts happen for non-bug reasons too (scope cut, merge conflict cleanup, "reverting to unblock CI"); title/body pattern-matching will catch some false positives. Every case retains the revert PR's URL so a human can spot-check the reason. |
+| Fixup/revert mining | Highest — a human explicitly undid this PR | Reverts happen for non-bug reasons too (scope cut, release-process rollback, "reverting to unblock CI"), and multi-repo verification measured that directly — see "Fixup at corpus scale". Oversized reverts are excluded as unlocalizable, and `defect_category` stratifies cases by whether the revert cites a bug ticket. Every case retains the revert PR's URL so a human can spot-check the reason. |
 | Human review comments | Medium — approximate, per CodeReviewer's own framing | Comments that aren't about defects (style nits, questions, praise) get filtered by a keyword/length heuristic plus thread-root filtering (below); some non-defect comments still get through; absence of a comment is not proof of absence of a defect (reviewers miss things — this is exactly the gap the whole project exists to measure, so it cannot be fully removed) |
 | Synthetic injection | Lowest realism, cleanest label | Injected bugs are, on average, easier to spot than organic ones (LLM-injected bugs tend toward "obviously wrong" rather than "subtly wrong"). Two partial mitigations are implemented: the injection prompt asks specifically for bugs a careless reviewer would plausibly miss, and injections the model itself flags as obvious-on-sight are dropped. Neither mitigation is verification — the model grading its own subtlety is exactly the kind of self-report this project exists to distrust. The clean source hunks also inherit source 2's weakness: "no substantive review comment" is not proof the original was defect-free, so an injected case could in principle contain two bugs, one of them unlabeled. |
 
@@ -377,3 +377,68 @@ Honest limitation: the formatting heuristic recognises shapes observed in
 real data, not every shape that exists. A tool that posts prose without a
 severity header still gets through. `comment_author` is recorded on every
 case so a missed one stays auditable after the fact rather than invisible.
+
+## Fixup at corpus scale (multi-repo)
+
+Mining `psf/requests` plus `django/django`, `ansible/ansible` and
+`scrapy/scrapy` took `fixup` from **6 cases to 169**, across 76 origin PRs,
+in about 2.5 minutes. Search-based revert discovery is what makes this
+cheap — one query per repo rather than paging whole PR histories.
+
+| Repo | Cases | Origin PRs |
+|---|---|---|
+| ansible/ansible | 112 | — |
+| django/django | 52 | — |
+| psf/requests | 6 | 4 |
+| scrapy/scrapy | 1 | 1 |
+| **total** | **169** | **76** |
+
+Yield tracks revert culture, not repo size alone: scrapy is a substantial
+project that simply reverts rarely.
+
+### Two defects found by verifying before trusting the count
+
+**Oversized reverts flooded the corpus.** The first multi-repo run produced
+289 cases, but 42% came from PRs contributing more than 10 files each, and
+`django/django#8031` alone contributed **67 cases — 23% of the entire
+corpus**. Every file in a reverted PR is labelled `defect`, so a large
+refactor revert marks dozens of innocent files as buggy. Such a PR is not
+localizable ground truth at all, so `MAX_FILES_PER_REVERTED_PR` now skips
+it outright rather than sampling from it — sampling would just be guessing
+which file held the bug. Result: 289 → 169 cases, max files per PR 67 → 10,
+median 2.
+
+**Revert reason is not uniform, and one signal predicts it.** Hand-checking
+24 origin PRs across both new repos found genuine non-defect reverts that
+path filtering cannot catch — `ansible/ansible#83044` ("Manual revert early
+2.15.11 (should be rc1)") is release-process housekeeping, and several
+others revert whole features for scope.
+
+Django's convention exposed a useful signal: a revert that *itself* closes
+a bug ticket ("Fixed #33598 -- Reverted ...") is much likelier to be undoing
+a real defect. Measured on the sample:
+
+| Stratum | Plausible defect reverts |
+|---|---|
+| `reverted_with_ticket` | ~10 of 12 |
+| `reverted` | ~6 of 12 |
+
+So `defect_category` records the stratum rather than filtering on it — a
+revert without a ticket may still be a real defect, and Phase 3 can report
+both strata separately and let the gap speak.
+
+**A false-signal mode inside that signal**, also found by hand-checking:
+revert titles quote the title of the PR they undo, so
+`Revert "Fixed #25417 -- Added a field check"` was scoring as
+ticket-citing. That ticket belongs to the *reverted* PR — counting it
+inverts the evidence, since it says the original fixed a bug and the revert
+undid that fix. `_revert_cites_ticket` strips quoted spans first;
+re-mining moved 20 cases out of the high-confidence stratum (76 → 56, 33%
+of the corpus).
+
+### Status of the clean corpus
+
+`fixup` is 169 cases and no longer trivially small, though still under the
+200-case floor on its own. Combined with `synthetic` (next step) the clean
+corpus clears it. `review_comment` remains excluded from the clean corpus
+and documented as a negative result.
