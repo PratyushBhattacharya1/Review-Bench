@@ -180,8 +180,8 @@ labels are not. Fixes are tracked in the next section.
    "Fixup miner, after the fix" below.
 2. **Positive labels are ~53-80% non-defects.** Unchanged by path
    filtering — see "Third measurement" below. Needs semantic filtering.
-3. **No author recorded, so bot/AI comments cannot be excluded.** See
-   above. Needs a schema field plus an AI-output heuristic.
+3. ~~**No author recorded, so bot/AI comments cannot be excluded.**~~
+   **Fixed** — see "Machine-authored contamination, measured" below.
 4. ~~**Fixup cases are labelled per-file, including incidental files.**~~
    **Fixed** by the shared path filter — see below.
 
@@ -333,3 +333,47 @@ statements have to be fixed before Phase 3 scoring means anything, and
 neither is fixed by another heuristic — the next move on defect 2 is the
 LLM judge, which is Phase 3 work pulled forward, and on defect 3 a schema
 change plus an AI-output detector.
+
+## Machine-authored contamination, measured
+
+`Case` now records `comment_author` and `comment_author_type`, and
+`is_machine_authored` (in the review-comment miner) excludes tool-written
+comments from positives by default. `--keep-machine-authored` retains them,
+so the rate stays measurable rather than silently discarded.
+
+Two independent checks, because one is demonstrably insufficient:
+
+1. GitHub's own `user.type == "Bot"`, which catches app-authored comments
+   such as `github-advanced-security[bot]`'s CodeQL findings.
+2. A structured-severity-header heuristic, which catches AI review tools
+   posting through ordinary user accounts. Both a bold ALL-CAPS severity
+   token *and* a confidence percentage are required — either alone occurs
+   in human writing ("**NOTE** this is fragile", "I have low confidence in
+   this test"), but the pair has been machine-generated in every instance
+   observed.
+
+### Result on psf/requests
+
+Across the 33 PRs that produced defect labels, **7 of 86 candidate
+positives (8.1%) were machine-authored**:
+
+| Author | Count | Caught by |
+|---|---|---|
+| `github-advanced-security[bot]` | 4 | `user.type == "Bot"` |
+| `sdm0p` | 3 | formatting heuristic only |
+
+**Three of the seven — 43% of the contamination — carry
+`user.type == "User"`** and would survive a type-based filter. That is the
+finding worth carrying into the write-up: the obvious defence against
+benchmark circularity is not sufficient, and any benchmark built on review
+comments that filters only on `user.type` still has another reviewer's
+output in its ground truth.
+
+Spot-check on PR #7431 confirms both directions: all three `sdm0p` comments
+are flagged, and the three human comments on the same PR
+(`sigmavirus24`, `nateprewitt`) are not.
+
+Honest limitation: the formatting heuristic recognises shapes observed in
+real data, not every shape that exists. A tool that posts prose without a
+severity header still gets through. `comment_author` is recorded on every
+case so a missed one stays auditable after the fact rather than invisible.

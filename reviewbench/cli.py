@@ -54,6 +54,7 @@ def _build_dataset_command(args: argparse.Namespace) -> int:
         pr_scan_limit=args.limit,
         model_client=model_client,
         synthetic_limit=args.synthetic_limit,
+        keep_machine_authored=args.keep_machine_authored,
     )
 
     print(f"Wrote {summary['total']} cases to {args.out}")
@@ -84,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     build.add_argument("--limit", type=int, default=300, help="max merged PRs to scan per miner (default: 300)")
     build.add_argument("--token", default=None, help="GitHub token (defaults to $GITHUB_TOKEN)")
+    build.add_argument(
+        "--keep-machine-authored",
+        action="store_true",
+        help="keep comments written by bots/AI reviewers as positives (default: excluded, "
+             "since benchmarking a reviewer against another reviewer's output is circular)",
+    )
 
     synth = build.add_argument_group("synthetic injection (only used with --sources synthetic)")
     synth.add_argument("--anthropic-api-key", default=None, help="defaults to $ANTHROPIC_API_KEY")

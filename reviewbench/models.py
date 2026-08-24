@@ -48,6 +48,14 @@ class Case:
     defect_category: str | None = None
     context: str | None = None
     human_comment: str | None = None
+    # Who wrote `human_comment`. Recorded because ground truth that contains
+    # another code reviewer's output — CodeQL, or an AI review bot — makes
+    # benchmarking a reviewer against it circular. `comment_author_type` is
+    # GitHub's own "User"/"Bot" classification, which is necessary but not
+    # sufficient: AI review tools post from user accounts too (see
+    # `is_machine_authored`).
+    comment_author: str | None = None
+    comment_author_type: str | None = None
     source_urls: list[str] = field(default_factory=list)
     created_at: str | None = None
 

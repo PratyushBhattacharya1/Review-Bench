@@ -34,6 +34,7 @@ def build_dataset(
     pr_scan_limit: int = 300,
     model_client: StructuredModelClient | None = None,
     synthetic_limit: int | None = None,
+    keep_machine_authored: bool = False,
 ) -> Iterator[Case]:
     """Run the requested miners and yield every Case produced. Callers are
     responsible for persisting (see `write_jsonl`); this stays a generator
@@ -61,7 +62,9 @@ def build_dataset(
 
         miner = _GITHUB_MINERS[source]
         logger.info("Running miner: %s", source)
-        yield from miner(client, owner, repo, pr_scan_limit=pr_scan_limit)
+        # Only the comment miner has an author to filter on.
+        extra = {"keep_machine_authored": keep_machine_authored} if source == "review_comment" else {}
+        yield from miner(client, owner, repo, pr_scan_limit=pr_scan_limit, **extra)
 
 
 def build_and_write(
@@ -74,6 +77,7 @@ def build_and_write(
     pr_scan_limit: int = 300,
     model_client: StructuredModelClient | None = None,
     synthetic_limit: int | None = None,
+    keep_machine_authored: bool = False,
 ) -> dict[str, int]:
     """Build the dataset and write it to `out_path`. Returns a summary
     dict with total case count and a per-provenance/per-label breakdown,
@@ -88,6 +92,7 @@ def build_and_write(
             pr_scan_limit=pr_scan_limit,
             model_client=model_client,
             synthetic_limit=synthetic_limit,
+            keep_machine_authored=keep_machine_authored,
         )
     )
     written = write_jsonl(cases, out_path)

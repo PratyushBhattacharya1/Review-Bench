@@ -34,6 +34,47 @@ _TRIVIAL_COMMENT_RE = re.compile(
 )
 _MIN_SUBSTANTIVE_LEN = 15
 
+# Structured severity/confidence headers, the signature of AI code-review
+# output. Both halves are required — a bold ALL-CAPS severity token *and* a
+# confidence score — because either alone appears in human writing
+# ("**NOTE** this is fragile", "I have no confidence in this test").
+# Together they are machine-generated in every instance observed.
+#
+# Tuned on real output found in psf/requests PR #7431:
+#     ⚠️ **HIGH** — *test_coverage* **Confidence:** 80%
+_MACHINE_SEVERITY_RE = re.compile(
+    r"\*\*(CRITICAL|HIGH|MEDIUM|LOW|INFO|WARNING|BLOCKER|NIT)\*\*", re.MULTILINE
+)
+_MACHINE_CONFIDENCE_RE = re.compile(r"\*{0,2}Confidence:?\*{0,2}\s*:?\s*\d{1,3}\s*%", re.IGNORECASE)
+
+
+def is_machine_authored(comment: dict) -> bool:
+    """True if `comment` was written by a tool rather than a person.
+
+    Ground truth that contains another code reviewer's output makes
+    benchmarking a code reviewer against it circular: the score stops
+    measuring "did it find the bug" and starts measuring "did it agree with
+    the other tool". None of the prior art this project builds on
+    (SWR-Bench, CodeReviewer, Qodo's benchmark) appears to control for it.
+
+    Two independent checks, because one is not enough. GitHub's own
+    `user.type == "Bot"` catches app-authored comments such as
+    `github-advanced-security[bot]`'s CodeQL findings. It does **not** catch
+    AI review tools that post through an ordinary user account — measured on
+    psf/requests, `sdm0p` posts severity/confidence-formatted review output
+    with `user.type == "User"`. The formatting heuristic covers that gap.
+
+    A heuristic, and honest about it: it recognises the shapes observed in
+    real data, not every shape that exists. `comment_author` is recorded on
+    every case so a missed one stays auditable after the fact.
+    """
+    user = comment.get("user") or {}
+    if (user.get("type") or "").lower() == "bot":
+        return True
+
+    body = comment.get("body") or ""
+    return bool(_MACHINE_SEVERITY_RE.search(body) and _MACHINE_CONFIDENCE_RE.search(body))
+
 
 def is_substantive_comment(body: str) -> bool:
     body = (body or "").strip()
@@ -71,11 +112,17 @@ def mine_review_comments(
     *,
     pr_scan_limit: int = 200,
     negatives_per_pr: int = 1,
+    keep_machine_authored: bool = False,
 ) -> Iterator[Case]:
     """Scan up to `pr_scan_limit` most-recently-updated merged PRs. Yields
     one positive Case per substantive inline review comment, plus up to
     `negatives_per_pr` no_defect Cases per PR sampled from files that
     received no substantive comment.
+
+    Comments written by tools are excluded from positives by default; see
+    `is_machine_authored` for why that matters. `keep_machine_authored=True`
+    retains them, which is how the contamination rate gets measured rather
+    than silently discarded.
     """
     scanned = 0
     for pr in client.get_paginated(
@@ -87,10 +134,25 @@ def mine_review_comments(
             continue
         scanned += 1
 
-        yield from _cases_for_pr(client, owner, repo, pr, negatives_per_pr=negatives_per_pr)
+        yield from _cases_for_pr(
+            client,
+            owner,
+            repo,
+            pr,
+            negatives_per_pr=negatives_per_pr,
+            keep_machine_authored=keep_machine_authored,
+        )
 
 
-def _cases_for_pr(client: GitHubClient, owner: str, repo: str, pr: dict, *, negatives_per_pr: int) -> Iterator[Case]:
+def _cases_for_pr(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr: dict,
+    *,
+    negatives_per_pr: int,
+    keep_machine_authored: bool = False,
+) -> Iterator[Case]:
     number = pr["number"]
     base_sha = pr.get("base", {}).get("sha", "")
     head_sha = pr.get("head", {}).get("sha", "")
@@ -115,6 +177,14 @@ def _cases_for_pr(client: GitHubClient, owner: str, repo: str, pr: dict, *, nega
             continue
         if not is_reviewable_code_path(c["path"]):
             continue
+        if not keep_machine_authored and is_machine_authored(c):
+            logger.debug(
+                "Skipping machine-authored comment on PR #%s by %s",
+                number,
+                (c.get("user") or {}).get("login"),
+            )
+            continue
+        author = c.get("user") or {}
         yield Case(
             id=make_case_id("review_comment", owner, repo, str(number), c["path"], str(c["id"])),
             repo=f"{owner}/{repo}",
@@ -128,6 +198,8 @@ def _cases_for_pr(client: GitHubClient, owner: str, repo: str, pr: dict, *, nega
             defect_category=None,
             context=None,
             human_comment=c.get("body"),
+            comment_author=author.get("login"),
+            comment_author_type=author.get("type"),
             source_urls=[c.get("html_url", ""), pr.get("html_url", "")],
             created_at=c.get("created_at"),
         )
