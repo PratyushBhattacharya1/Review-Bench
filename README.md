@@ -24,19 +24,26 @@ This project is being built in public phases. Current state:
 |---|---|---|
 | 0 | Scoping, README, design doc | done |
 | 1 | Dataset builder (all three ground-truth sources) | code complete; **labels not yet trustworthy** — see below |
-| 2 | Runner + adapters (raw model APIs, PR-Agent) | not started |
-| 3 | Scoring (detection, localization, noise rate, LLM-judge) | not started |
+| 2 | Runner + adapters (Anthropic, OpenAI) | built; PR-Agent adapter deferred to Phase 4 |
+| 3 | Scoring (detection, noise rate, cost/latency) | built; LLM-judge semantic match deferred |
 | 4 | Ship (Docker, GitHub Action, results site) | not started |
 | 5 | Write-up | not started |
 
-**Current blocker, stated plainly: no dataset this tool produces should be
-used to score a reviewer yet.** The pipeline runs end to end against a real
-repo; the labels it produces do not hold up to hand-verification. On
-`psf/requests`, `review_comment` positives measure 20% precision (strict) /
-47.5% (generous), and `fixup` yields only 6 cases from the whole repo
-history. Every measurement, and the three open defects behind them, are in
-[docs/DESIGN.md](docs/DESIGN.md). Fixing label quality is the work that
-gates Phase 3.
+**Stated plainly: label quality still gates publishing any score.** The
+pipeline runs end to end — mine, review, score — but the three sources are
+not equally trustworthy, and every claim below is measured rather than
+assumed:
+
+| Source | Corpus | Label quality | Usable? |
+|---|---|---|---|
+| `fixup` | 169 cases, 4 repos | clean after filtering; positives only | yes, but cannot measure precision or noise rate alone |
+| `synthetic` | not yet run (needs an API key) | clean by construction, paired +/- | the source that makes noise rate measurable |
+| `review_comment` | 201 cases | 20% precision (strict) / 47.5% (generous) | **no** — documented as a negative result |
+
+`review_comment` is the approach the CodeReviewer dataset uses, and
+measuring it at 20% precision on a well-reviewed repo is a finding, not a
+setback. Every measurement and every open defect lives in
+[docs/DESIGN.md](docs/DESIGN.md).
 
 Ground truth comes from three sources, of ascending difficulty to mine. See
 [docs/DESIGN.md](docs/DESIGN.md) for the full rationale, including how this
@@ -44,11 +51,13 @@ project tries to avoid the known failure modes documented in the SWE-Bench+
 and SWR-Bench papers.
 
 1. **Fixup/revert mining** (`reviewbench/miners/fixup_miner.py`) —
-   implemented. Finds merged PRs whose title/body is a GitHub-generated
-   revert (`This reverts commit <sha>`), resolves the reverted commit back
-   to the PR that introduced it via the GitHub "list pull requests
-   associated with a commit" endpoint, and labels that original PR's diff
-   as a positive (defect) case.
+   implemented. Finds revert PRs via GitHub search (reverts are rare and
+   old, so a recency scan finds none), then resolves what each one undid.
+   Both reference styles are handled: GitHub's generated
+   `This reverts commit <sha>` footer *and* human-written `Reverts #2442`
+   references — measured on `psf/requests`, only 1 revert in 8 uses the
+   footer. Oversized reverts are excluded as unlocalizable, and cases are
+   stratified by whether the revert itself cites a bug ticket.
 2. **Human review comments as labels**
    (`reviewbench/miners/review_comment_miner.py`) — implemented. Pulls
    inline review comments on merged PRs as positive (defect) cases, and
@@ -105,7 +114,21 @@ Model responses are cached on disk keyed by a hash of the full request
 a tweak elsewhere in the pipeline does not re-pay for injections you have
 already generated. `--no-cache` disables it.
 
-Each line of the output is one `Case` (see [reviewbench/models.py](reviewbench/models.py)):
+### Scoring a reviewer
+
+```bash
+python -m reviewbench.cli run   --dataset data/requests.jsonl   --reviewer anthropic --model claude-opus-4-8   --out data/preds.jsonl
+
+python -m reviewbench.cli score   --dataset data/requests.jsonl   --predictions data/preds.jsonl
+```
+
+Scores are always broken out by provenance, never pooled, and rows whose
+ratios cannot be interpreted are flagged inline — `fixup` emits positives
+only, so its precision is 100% by construction and the report says so rather
+than letting the number stand. Cost and latency are reported per case; an
+unpriced model reports `None` rather than `0.0`, because zero reads as free.
+
+Each line of the dataset is one `Case` (see [reviewbench/models.py](reviewbench/models.py)):
 diff hunk, surrounding file context, base/head commit SHAs, label
 (`defect`/`no_defect`), defect category (when known), provenance tag, the
 originating human comment (if any), and source URLs for traceability back
@@ -124,8 +147,8 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Tests mock the GitHub API (no network, no token required) and run the
-injector against a fake model client (no API key, no cost) — the injector
-depends on a `StructuredModelClient` protocol rather than on the Anthropic
-SDK directly, which is the same seam Phase 2's reviewer adapters will
-plug into.
+Every test runs with no network, no GitHub token, and no API key. The
+GitHub API is mocked; the injector and the reviewer adapters run against
+fakes. That is the payoff of `StructuredModelClient` and `Reviewer` being
+Protocols rather than base classes — the whole mine-review-score pipeline is
+exercisable offline.

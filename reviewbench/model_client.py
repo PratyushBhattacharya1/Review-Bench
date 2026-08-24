@@ -58,6 +58,12 @@ class AnthropicClient:
         self.max_tokens = max_tokens
         self.effort = effort
         self.cache = cache if cache is not None else ResponseCache()
+        # Usage from the most recent call, so callers can price a request
+        # without the protocol having to carry usage through every return
+        # type. A cache hit reports zeros, which is accurate: no tokens were
+        # spent.
+        self.last_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self.last_was_cached = False
 
     def complete_json(self, *, system: str, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
         key = cache_key(
@@ -71,7 +77,10 @@ class AnthropicClient:
         cached = self.cache.get(key)
         if cached is not None:
             logger.debug("Cache hit for %s", key[:12])
+            self.last_usage = {"input_tokens": 0, "output_tokens": 0}
+            self.last_was_cached = True
             return cached
+        self.last_was_cached = False
 
         response = self._client.messages.create(
             model=self.model,
@@ -94,6 +103,12 @@ class AnthropicClient:
         text = next((b.text for b in response.content if b.type == "text"), None)
         if text is None:
             raise RuntimeError(f"No text block in response (stop_reason={response.stop_reason})")
+
+        usage = getattr(response, "usage", None)
+        self.last_usage = {
+            "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+            "output_tokens": getattr(usage, "output_tokens", 0) or 0,
+        }
 
         parsed = json.loads(text)
         self.cache.set(key, parsed)

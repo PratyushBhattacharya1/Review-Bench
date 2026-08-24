@@ -1,6 +1,8 @@
 """CLI entry point.
 
     python -m reviewbench.cli build-dataset --repo owner/name --out data.jsonl
+    python -m reviewbench.cli run --dataset data.jsonl --reviewer anthropic --out preds.jsonl
+    python -m reviewbench.cli score --dataset data.jsonl --predictions preds.jsonl
 """
 
 from __future__ import annotations
@@ -14,6 +16,9 @@ from reviewbench.cache import DEFAULT_CACHE_DIR, ResponseCache
 from reviewbench.dataset import build_and_write, parse_repo
 from reviewbench.github_client import GitHubClient
 from reviewbench.model_client import DEFAULT_MODEL, AnthropicClient
+from reviewbench.models import read_jsonl
+from reviewbench.runner import read_predictions, run_reviewer, write_predictions
+from reviewbench.scoring import format_report, score
 
 
 def _build_dataset_command(args: argparse.Namespace) -> int:
@@ -84,6 +89,85 @@ def _build_dataset_command(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _make_reviewer(args: argparse.Namespace):
+    """Build the requested reviewer adapter.
+
+    Import is deferred per-adapter so that missing an optional SDK only
+    breaks the reviewer that needs it.
+    """
+    cache = ResponseCache(args.cache_dir, enabled=not args.no_cache)
+    if args.reviewer == "anthropic":
+        from reviewbench.reviewers.anthropic_reviewer import AnthropicReviewer
+
+        model = args.model or DEFAULT_MODEL
+        return AnthropicReviewer(
+            model=model, api_key=os.environ.get("ANTHROPIC_API_KEY"), cache=cache
+        )
+    if args.reviewer == "openai":
+        from reviewbench.reviewers.openai_reviewer import (
+            DEFAULT_OPENAI_MODEL,
+            OpenAIReviewer,
+        )
+
+        model = args.model or DEFAULT_OPENAI_MODEL
+        return OpenAIReviewer(
+            model=model, api_key=os.environ.get("OPENAI_API_KEY"), cache=cache
+        )
+    raise ValueError(f"Unknown reviewer: {args.reviewer}")
+
+
+def _run_command(args: argparse.Namespace) -> int:
+    cases = list(read_jsonl(args.dataset))
+    if args.limit:
+        cases = cases[: args.limit]
+    if not cases:
+        print(f"error: no cases in {args.dataset}", file=sys.stderr)
+        return 2
+
+    try:
+        reviewer = _make_reviewer(args)
+    except ImportError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    written = write_predictions(run_reviewer(reviewer, cases), args.out)
+    print(f"Reviewed {written} cases with {reviewer.name}:{reviewer.model} -> {args.out}")
+
+    predictions = list(read_predictions(args.out))
+    errored = sum(1 for p in predictions if p.error)
+    cached = sum(1 for p in predictions if p.cached)
+    priced = [p.estimated_cost_usd for p in predictions if p.estimated_cost_usd is not None]
+    if cached:
+        print(f"  {cached} served from cache (no tokens spent)")
+    if errored:
+        print(f"  WARNING: {errored} reviews errored", file=sys.stderr)
+    if priced:
+        print(f"  estimated cost: ${sum(priced):.4f}")
+    return 0
+
+
+def _score_command(args: argparse.Namespace) -> int:
+    cases = list(read_jsonl(args.dataset))
+    predictions = list(read_predictions(args.predictions))
+    scores = score(cases, predictions)
+
+    if args.json:
+        import json
+
+        print(json.dumps({k: v.to_dict() for k, v in scores.items()}, indent=2, sort_keys=True))
+        return 0
+
+    print(format_report(scores))
+    print()
+    print(
+        "Reminder: report the dataset's own label error rate alongside these "
+        "numbers. A score computed on unverified labels is not a measurement "
+        "(see docs/DESIGN.md)."
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="reviewbench")
     parser.add_argument("-v", "--verbose", action="store_true", help="enable INFO-level logging")
@@ -118,6 +202,25 @@ def main(argv: list[str] | None = None) -> int:
     synth.add_argument("--no-cache", action="store_true", help="disable the model response cache")
 
     build.set_defaults(func=_build_dataset_command)
+
+    run = subparsers.add_parser("run", help="run a reviewer over a dataset")
+    run.add_argument("--dataset", required=True, help="JSONL dataset from build-dataset")
+    run.add_argument("--out", required=True, help="output predictions JSONL")
+    run.add_argument(
+        "--reviewer", default="anthropic", choices=["anthropic", "openai"],
+        help="which adapter to score (default: anthropic)",
+    )
+    run.add_argument("--model", default=None, help="model id (defaults per reviewer)")
+    run.add_argument("--limit", type=int, default=None, help="only review the first N cases")
+    run.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help="response cache directory")
+    run.add_argument("--no-cache", action="store_true", help="disable the response cache")
+    run.set_defaults(func=_run_command)
+
+    scorer = subparsers.add_parser("score", help="score predictions against a dataset")
+    scorer.add_argument("--dataset", required=True, help="JSONL dataset")
+    scorer.add_argument("--predictions", required=True, help="JSONL predictions from run")
+    scorer.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    scorer.set_defaults(func=_score_command)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s")

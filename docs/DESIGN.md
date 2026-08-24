@@ -442,3 +442,56 @@ of the corpus).
 200-case floor on its own. Combined with `synthetic` (next step) the clean
 corpus clears it. `review_comment` remains excluded from the clean corpus
 and documented as a negative result.
+
+## Phase 2/3: runner, adapters, scoring
+
+`Reviewer` (in `reviewbench/reviewers/base.py`) is a Protocol, mirroring
+`StructuredModelClient`. A raw model call, a hosted product, and a test fake
+all satisfy it without inheriting anything, which is why the entire
+run-and-score pipeline is testable with no API key and no network.
+
+Both adapters share one prompt and one schema, so a score difference between
+them is a model difference rather than a prompt difference. The review
+prompt deliberately withholds provenance and label — telling a reviewer that
+a hunk came from a reverted PR would leak the answer.
+
+Cost and latency are recorded per case from the start rather than added
+later. An unpriced model yields `None`, not `0.0`: zero reads as free.
+
+### A structural limit the first end-to-end run exposed
+
+Running the pipeline over 60 real `fixup` cases plus 40 real negatives
+produced correct numbers and one misleading row:
+
+```
+provenance            n(+/-)    prec  recall      F1   noise     loc
+fixup                   60/0  100.0%   71.7%   83.5%     n/a   67.4%
+```
+
+**`fixup` emits positives only, by construction** — a reverted PR gives you
+buggy code, never a matching clean counterpart. So its precision is 100%
+because there were no clean cases it could have been wrong about, and its
+noise rate is uncomputable. The number is real; the interpretation is not.
+
+Rather than hide the row, `ProvenanceScore.caveats` flags it inline, and the
+same applies in reverse to a negatives-only provenance. This is the project's
+own thesis turned on itself: a metric that looks authoritative and cannot be
+interpreted is exactly the failure mode SWE-Bench+ documented.
+
+The consequence for the corpus is concrete: **`fixup` alone cannot measure
+precision or noise rate**, the two metrics this project claims vendors
+under-report. `synthetic` is what supplies paired positives and negatives on
+the same code, which makes it load-bearing rather than a nice-to-have — and
+that pairing is precisely why it was designed to emit the clean original
+alongside every injected bug.
+
+### Deliberately not built yet
+
+The LLM-as-judge semantic match. `localization_rate` currently measures
+"a line-bearing finding landed inside the case's hunk", which is a weak
+proxy and labelled as one in the report itself. It cannot measure "found
+the *right* bug", because `fixup` ground truth knows the file but not the
+offending line. Closing that needs a judge, and a judge needs its own
+methodology work — order randomisation, a different model family than the
+reviewer, and validated judge-versus-human agreement on a labelled subset.
+That is a step, not a footnote.
