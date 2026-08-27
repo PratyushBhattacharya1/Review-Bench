@@ -18,6 +18,10 @@ academic artifact.
 
 ## Status
 
+New here (human or Claude)? Read [CLAUDE.md](CLAUDE.md) and
+[docs/STATUS.md](docs/STATUS.md) first. `docs/DESIGN.md` is an append-only
+audit trail whose early status claims are superseded by design.
+
 This project is being built in public phases. Current state:
 
 | Phase | Scope | Status |
@@ -27,7 +31,7 @@ This project is being built in public phases. Current state:
 | 2 | Runner + adapters (Anthropic, OpenAI) | built; PR-Agent adapter deferred to Phase 4 |
 | 3 | Scoring (detection, noise rate, cost/latency) | built; LLM-judge semantic match deferred |
 | 4 | Ship (Docker, GitHub Action, results site) | not started |
-| 5 | Write-up | not started |
+| 5 | Write-up | **next priority** — findings are measured and need no further spend |
 
 **Stated plainly: label quality still gates publishing any score.** The
 pipeline runs end to end — mine, review, score — but the three sources are
@@ -117,9 +121,14 @@ already generated. `--no-cache` disables it.
 ### Scoring a reviewer
 
 ```bash
-python -m reviewbench.cli run   --dataset data/requests.jsonl   --reviewer anthropic --model claude-opus-4-8   --out data/preds.jsonl
+python -m reviewbench.cli run \
+  --dataset data/requests.jsonl \
+  --reviewer anthropic --model claude-opus-4-8 \
+  --out data/preds.jsonl
 
-python -m reviewbench.cli score   --dataset data/requests.jsonl   --predictions data/preds.jsonl
+python -m reviewbench.cli score \
+  --dataset data/requests.jsonl \
+  --predictions data/preds.jsonl
 ```
 
 Scores are always broken out by provenance, never pooled, and rows whose

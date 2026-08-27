@@ -1,5 +1,17 @@
 # Design doc: ground truth and known failure modes
 
+> **How to read this document.** It is an **append-only audit trail in
+> discovery order**, not a description of the current system. Sections were
+> written as each measurement landed, so **earlier status claims are
+> superseded by later ones** — the section below that calls `fixup` "too
+> small to use alone (6 cases)" was true when written and is not true now
+> (169 cases, four repos). For current state, read
+> [`STATUS.md`](STATUS.md); when the two disagree, STATUS.md wins.
+>
+> The chronology is deliberate and should not be rewritten. Being able to
+> show *what was believed, what measurement contradicted it, and what
+> changed* is the point of keeping it.
+
 This is written before the dataset builder, per the project's own rule:
 if the value proposition and the failure modes can't be stated up front,
 the design isn't ready.
