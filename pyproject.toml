@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reviewbench"
+version = "0.1.0"
+description = "Mine a repo's own merged PR history into a bespoke code-review eval set, then score any AI code reviewer against it."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+synthetic = [
+    "anthropic>=0.40",
+]
+openai = [
+    "openai>=1.40",
+]
+dev = [
+    "pytest>=8.0",
+    "responses>=0.25",
+]
+
+[project.scripts]
+reviewbench = "reviewbench.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["reviewbench*"]
